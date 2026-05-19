@@ -1,18 +1,18 @@
 import asyncio
 import sqlite3
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import logging
-from aiogram.types import FSInputFile
 
-# ========== ТОЛЬКО ТОКЕН ==========
-BOT_TOKEN = '8752409184:AAFHBonoFK1buVQv_v8MdaR4jezbG2ommEU'
+# ========== ТОЛЬКО ТОКЕН (всё остальное в БД) ==========
+BOT_TOKEN = '8752409184:AAFHBonoFK1buVQv_v8MdaR4jezbG2ommEU'  # Заменить
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ def init_database():
     conn = sqlite3.connect('wise_bot.db')
     cur = conn.cursor()
 
+    # Пользователи
     cur.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -33,6 +34,7 @@ def init_database():
         total_orders INTEGER DEFAULT 0
     )''')
 
+    # Аккаунты для автоматической выдачи
     cur.execute('''CREATE TABLE IF NOT EXISTS accounts_pool (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         account_data TEXT,
@@ -42,6 +44,7 @@ def init_database():
         used_by INTEGER
     )''')
 
+    # Заказы
     cur.execute('''CREATE TABLE IF NOT EXISTS orders (
         order_id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -53,6 +56,7 @@ def init_database():
         account_data TEXT
     )''')
 
+    # Заявки на пополнение (крипта)
     cur.execute('''CREATE TABLE IF NOT EXISTS deposits (
         dep_id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -64,36 +68,43 @@ def init_database():
         admin_note TEXT
     )''')
 
+    # Криптокошельки
     cur.execute('''CREATE TABLE IF NOT EXISTS crypto_wallets (
         currency TEXT PRIMARY KEY,
         wallet_address TEXT,
         is_active INTEGER DEFAULT 1
     )''')
 
+    # Цены
     cur.execute('''CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value REAL
     )''')
 
+    # Администраторы (храним user_id)
     cur.execute('''CREATE TABLE IF NOT EXISTS admins (
         user_id INTEGER PRIMARY KEY,
         added_by INTEGER,
         added_at TEXT
     )''')
 
+    # Контакт для СБП (username администратора, который будет отображаться)
     cur.execute('''CREATE TABLE IF NOT EXISTS bot_config (
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
 
+    # Вставляем настройки по умолчанию
     cur.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)', ('price_single', 9.0))
     cur.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)', ('price_exact_10', 8.0))
     cur.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)', ('price_wholesale', 7.5))
 
+    # Криптокошельки
     cur.execute('INSERT OR IGNORE INTO crypto_wallets (currency, wallet_address) VALUES (?,?)', ('USDT', 'TXvYOURWALLET'))
     cur.execute('INSERT OR IGNORE INTO crypto_wallets (currency, wallet_address) VALUES (?,?)', ('BTC', '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'))
     cur.execute('INSERT OR IGNORE INTO crypto_wallets (currency, wallet_address) VALUES (?,?)', ('TON', 'UQYOURTONWALLET'))
 
+    # Контакт администратора для СБП (по умолчанию)
     cur.execute('INSERT OR IGNORE INTO bot_config (key, value) VALUES (?,?)', ('sbp_admin_username', 'support_username'))
 
     conn.commit()
@@ -442,45 +453,39 @@ async def notify_admins(text, reply_markup=None):
         except:
             pass
 
-# ========== ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЕЙ ==========
-
-from aiogram.types import FSInputFile
-import os
-
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user = message.from_user
     DB.add_user(user.id, user.username or "", user.first_name, user.last_name)
     sbp_contact = DB.get_sbp_admin_username()
     
-    # Вариант 1: фото из файла в папке с ботом
+    # Текст приветственного сообщения
+    welcome_text = (
+        f"💳 *Добро пожаловать в магазин WISE аккаунтов!*\n\n"
+        f"💰 Ваш баланс: $0\n"
+        f"🔹 1 аккаунт: ${DB.get_price('price_single')}\n"
+        f"🔸 10 аккаунтов: ${10*DB.get_price('price_exact_10')} (${DB.get_price('price_exact_10')}/шт)\n"
+        f"🔹 от 11 аккаунтов: ${DB.get_price('price_wholesale')}/шт\n\n"
+        f"Выберите действие:"
+    )
+    
+    # Проверяем наличие файла photo.jpg в папке с ботом
     photo_path = "photo.jpg"
     
-    # Проверяем, существует ли файл
     if os.path.exists(photo_path):
+        # Если фото существует - отправляем с фото
         photo = FSInputFile(photo_path)
         await message.answer_photo(
             photo=photo,
-            caption=(
-                f"💳 *Добро пожаловать в магазин WISE аккаунтов!*\n\n"
-                f"💰 Ваш баланс: $0\n"
-                f"🔹 1 аккаунт: ${DB.get_price('price_single')}\n"
-                f"🔸 10 аккаунтов: ${10*DB.get_price('price_exact_10')} (${DB.get_price('price_exact_10')}/шт)\n"
-                f"🔹 от 11 аккаунтов: ${DB.get_price('price_wholesale')}/шт\n\n"
-                f"Выберите действие:"
-            ),
+            caption=welcome_text,
             reply_markup=Keyboards.main_menu(user.id),
             parse_mode="Markdown"
         )
     else:
-        # Если файла нет, отправляем только текст
+        # Если файл не найден - отправляем только текст
+        logger.warning(f"Файл {photo_path} не найден в директории")
         await message.answer(
-            f"💳 *Добро пожаловать в магазин WISE аккаунтов!*\n\n"
-            f"💰 Ваш баланс: $0\n"
-            f"🔹 1 аккаунт: ${DB.get_price('price_single')}\n"
-            f"🔸 10 аккаунтов: ${10*DB.get_price('price_exact_10')} (${DB.get_price('price_exact_10')}/шт)\n"
-            f"🔹 от 11 аккаунтов: ${DB.get_price('price_wholesale')}/шт\n\n"
-            f"Выберите действие:",
+            welcome_text,
             reply_markup=Keyboards.main_menu(user.id),
             parse_mode="Markdown"
         )
@@ -546,15 +551,6 @@ async def custom_quantity_input(message: Message, state: FSMContext):
 async def auto_buy(callback, state, quantity):
     user_id = callback.from_user.id
     user = DB.get_user(user_id)
-    if user is None:
-        # Пользователь не найден – добавим
-        user_obj = callback.from_user if hasattr(callback, 'from_user') else None
-        if user_obj:
-            DB.add_user(user_obj.id, user_obj.username or "", user_obj.first_name, user_obj.last_name)
-        user = DB.get_user(user_id)
-        if user is None:
-            await callback.message.edit_text("Ошибка: не удалось найти пользователя. Начните с /start")
-            return
     price_per_unit, total_price, _ = calculate_price(quantity)
     if user['balance'] < total_price:
         need = total_price - user['balance']
@@ -733,7 +729,7 @@ async def admin_panel(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(lambda c: c.data == "admin_add_accounts")
 @admin_required
-async def add_accounts_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def add_accounts_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.sending_accounts)
     await callback.message.edit_text("Отправьте аккаунты (каждый с новой строки) или .txt файл.\nФормат: логин:пароль")
 
@@ -767,27 +763,21 @@ async def list_deposits(callback: CallbackQuery, **kwargs):
             await bot.send_message(user_id, f"❌ Ваша заявка #{dep_id} автоматически отклонена (прошло более 24 часов). Создайте новую.")
         except:
             pass
-
     deposits = DB.get_pending_deposits()
     if not deposits:
         await callback.message.edit_text("Нет неподтверждённых пополнений.", reply_markup=Keyboards.admin_panel())
         return
-
-    # Отправляем общий список
     text = "💰 *Заявки на пополнение:*\n\n"
     for d in deposits:
         text += f"#{d['dep_id']} | {d['user_id']} | ${d['amount']:.2f} | {d['method']} | {d['created_at'][:10]}\n"
     await callback.message.edit_text(text, reply_markup=Keyboards.admin_panel(), parse_mode="Markdown")
-
-    # Для каждой заявки отправляем отдельное сообщение с фото (если есть)
     for d in deposits:
         caption = f"📌 Заявка #{d['dep_id']}\n👤 Пользователь: {d['user_id']}\n💰 Сумма: ${d['amount']:.2f}\n💳 Метод: {d['method']}\n🕐 Создана: {d['created_at'][:10]}"
-        if d['proof'] and isinstance(d['proof'], str) and (d['proof'].startswith('AgAC') or d['proof'].startswith('BQAC')):
+        if d['proof'] and d['proof'].startswith('AgAC'):
             try:
                 await bot.send_photo(callback.from_user.id, d['proof'], caption=caption, reply_markup=Keyboards.deposit_actions(d['dep_id']))
             except:
-                await callback.message.answer(caption + f"\n[Не удалось отобразить фото]")
-                await callback.message.answer(f"Заявка #{d['dep_id']}", reply_markup=Keyboards.deposit_actions(d['dep_id']))
+                await callback.message.answer(caption, reply_markup=Keyboards.deposit_actions(d['dep_id']))
         else:
             await callback.message.answer(caption, reply_markup=Keyboards.deposit_actions(d['dep_id']))
 
@@ -819,7 +809,7 @@ async def crypto_menu(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(lambda c: c.data.startswith("edit_crypto_"))
 @admin_required
-async def edit_crypto(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def edit_crypto(callback: CallbackQuery, state: FSMContext):
     currency = callback.data.split("_")[2]
     await state.update_data(crypto_currency=currency)
     await state.set_state(AdminStates.editing_crypto)
@@ -843,7 +833,7 @@ async def edit_prices_menu(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(lambda c: c.data.startswith("edit_price_"))
 @admin_required
-async def edit_price_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def edit_price_start(callback: CallbackQuery, state: FSMContext):
     key_map = {
         'edit_price_single': 'price_single',
         'edit_price_exact_10': 'price_exact_10',
@@ -896,7 +886,7 @@ async def list_admins(callback: CallbackQuery, **kwargs):
 
 @dp.callback_query(lambda c: c.data == "admin_add_admin")
 @admin_required
-async def add_admin_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def add_admin_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.adding_admin)
     await callback.message.edit_text("Введите Telegram ID пользователя, которого хотите сделать администратором:")
 
@@ -921,7 +911,7 @@ async def add_admin(message: Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "admin_remove_admin")
 @admin_required
-async def remove_admin_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def remove_admin_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.removing_admin)
     await callback.message.edit_text("Введите Telegram ID администратора, которого хотите удалить.\n(Вы не можете удалить самого себя)")
 
@@ -945,7 +935,7 @@ async def remove_admin(message: Message, state: FSMContext):
 # ---------- Контакт для СБП ----------
 @dp.callback_query(lambda c: c.data == "admin_edit_sbp_contact")
 @admin_required
-async def edit_sbp_contact_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def edit_sbp_contact_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.editing_sbp_contact)
     current = DB.get_sbp_admin_username()
     await callback.message.edit_text(
@@ -971,7 +961,7 @@ async def save_sbp_contact(message: Message, state: FSMContext):
 # ---------- Рассылка и статистика ----------
 @dp.callback_query(lambda c: c.data == "admin_broadcast")
 @admin_required
-async def broadcast_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+async def broadcast_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.broadcasting)
     await callback.message.edit_text("Введите текст для рассылки (Markdown):")
 
@@ -1018,7 +1008,7 @@ async def admin_stats(callback: CallbackQuery, **kwargs):
 # ========== ЗАПУСК ==========
 async def main():
     init_database()
-    FIRST_ADMIN_ID = 7750744693  # ЗАМЕНИТЕ НА ВАШ ID
+    FIRST_ADMIN_ID = 7750744693  # Замените на ваш Telegram ID
     if not DB.get_all_admins():
         DB.add_admin(FIRST_ADMIN_ID, 0)
         logger.info(f"Добавлен первый администратор {FIRST_ADMIN_ID}")
